@@ -25,7 +25,6 @@ int main(int argc, char *argv[]){
 	dictionary *ini = iniOpen(argc,argv); // No printing before this
 	msg(STATUS, "PINC %s started.", VERSION);    // Needs MPI
 	MPI_Barrier(MPI_COMM_WORLD);
-	parseIndirectInput(ini);
 
 	/*
 	 * CHOOSE PINC RUN MODE
@@ -33,8 +32,6 @@ int main(int argc, char *argv[]){
 	void (*run)() = select(ini,"methods:mode",	regular_set,
 												mgMode_set,
 												mgModeErrorScaling_set,
-												puModeParticle_set,
-												puModeInterp_set,
 												sMode_set);
 	run(ini);
 
@@ -83,6 +80,9 @@ void regular(dictionary *ini){
 	/*
 	 * INITIALIZE PINC VARIABLES
 	 */
+	Units *units=uAlloc(ini);
+	uNormalize(ini, units);
+
 	MpiInfo *mpiInfo = gAllocMpi(ini);
 	Population *pop = pAlloc(ini);
 	Grid *E   = gAlloc(ini, VECTOR);
@@ -107,6 +107,7 @@ void regular(dictionary *ini){
 	/*
 	 * PREPARE FILES FOR WRITING
 	 */
+
 	int rank = phi->rank;
 	double *denorm = malloc((rank-1)*sizeof(*denorm));
 	double *dimen = malloc((rank-1)*sizeof(*dimen));
@@ -122,14 +123,12 @@ void regular(dictionary *ini){
     oOpenH5(ini, obj, mpiInfo, denorm, dimen, "test");          // for capMatrix - objects
     oReadH5(obj, mpiInfo);                                      // for capMatrix - objects
 
+
 	hid_t history = xyOpenH5(ini,"history");
 	pCreateEnergyDatasets(history,pop);
 
 	// Add more time series to history if you want
 	// xyCreateDataset(history,"/group/group/dataset");
-
-	free(denorm);
-	free(dimen);
 
 	/*
 	 * INITIAL CONDITIONS
@@ -182,7 +181,7 @@ void regular(dictionary *ini){
 	 * TIME LOOP
 	 */
 
-	Timer *t = tAlloc(rank);
+	Timer *t = tAlloc(mpiInfo->mpiRank);
 
 	// n should start at 1 since that's the timestep we have after the first
 	// iteration (i.e. when storing H5-files).
@@ -303,6 +302,7 @@ void regular(dictionary *ini){
 	gFree(E);
 	pFree(pop);
     oFree(obj);             // for capMatrix - objects
+
 
 	gsl_rng_free(rngSync);
 	gsl_rng_free(rng);
