@@ -10,6 +10,7 @@
 #include "core.h"
 #include "pusher.h"
 #include "multigrid.h"
+#include "spectral.h"
 #include "object.h"
 
 void regular(dictionary *ini);
@@ -24,7 +25,6 @@ int main(int argc, char *argv[]){
 	dictionary *ini = iniOpen(argc,argv); // No printing before this
 	msg(STATUS, "PINC %s started.", VERSION);    // Needs MPI
 	MPI_Barrier(MPI_COMM_WORLD);
-	parseIndirectInput(ini);
 
 	/*
 	 * CHOOSE PINC RUN MODE
@@ -32,8 +32,7 @@ int main(int argc, char *argv[]){
 	void (*run)() = select(ini,"methods:mode",	regular_set,
 												mgMode_set,
 												mgModeErrorScaling_set,
-												puModeParticle_set,
-												puModeInterp_set);
+												sMode_set);
 	run(ini);
 
 	/*
@@ -53,33 +52,38 @@ void regular(dictionary *ini){
 	/*
 	 * SELECT METHODS
 	 */
-	void (*acc)()   = select(ini,"methods:acc",	puAcc3D1_set,
+	void (*acc)()   			= select(ini,	"methods:acc",
+												puAcc3D1_set,
 												puAcc3D1KE_set,
 												puAccND1_set,
 												puAccND1KE_set,
 												puAccND0_set,
 												puAccND0KE_set);
 
-	void (*distr)() = select(ini,"methods:distr",	puDistr3D1_set,
-													puDistrND1_set,
-													puDistrND0_set);
+	void (*distr)() 			= select(ini,	"methods:distr",
+												puDistr3D1_set,
+												puDistrND1_set,
+												puDistrND0_set);
 
-	void (*solve)() = select(ini,"methods:poisson", mgSolve_set);
+	void (*extractEmigrants)()	= select(ini,	"methods:migrate",
+												puExtractEmigrants3D_set,
+												puExtractEmigrantsND_set);
 
-	void (*extractEmigrants)() = select(ini,"methods:migrate",	puExtractEmigrants3D_set,
-																puExtractEmigrantsND_set);
+	void (*solverInterface)()	= select(ini,	"methods:poisson",
+												mgSolver_set,
+												sSolver_set);
 
-	// char *str;
-	//
-	// str = iniGetStr("methods:acc");
-	// void (*acc)() = NULL;
-	// if(!strcmp(str,"puAcc3D1")) acc = puAcc3D1_set();
-	// if(!strcmp(str,"puAcc3D1KE")) acc = puAcc3D1KE_set();
-	// if(acc==NULL) msg(ERROR,"methods:acc=%s is an invalid option")
+	void (*solve)() = NULL;
+	void *(*solverAlloc)() = NULL;
+	void (*solverFree)() = NULL;
+	solverInterface(&solve, &solverAlloc, &solverFree);
 
 	/*
 	 * INITIALIZE PINC VARIABLES
 	 */
+	Units *units=uAlloc(ini);
+	uNormalize(ini, units);
+
 	MpiInfo *mpiInfo = gAllocMpi(ini);
 	Population *pop = pAlloc(ini);
 	Grid *E   = gAlloc(ini, VECTOR);
@@ -101,14 +105,10 @@ void regular(dictionary *ini){
 	// Setting Boundary slices
 	gSetBndSlices(phi, mpiInfo);
 
-	//Set mgSolve
-	MgAlgo mgAlgo = getMgAlgo(ini);
-
 	// Random number seeds
 	gsl_rng *rngSync = gsl_rng_alloc(gsl_rng_mt19937);
 	gsl_rng *rng = gsl_rng_alloc(gsl_rng_mt19937);
 	gsl_rng_set(rng,mpiInfo->mpiRank+1); // Seed needs to be >=1
-
 
 	/*
 	 * PREPARE FILES FOR WRITING
@@ -129,14 +129,12 @@ void regular(dictionary *ini){
     oOpenH5(ini, obj, mpiInfo, denorm, dimen, "test");
     oReadH5(obj, mpiInfo);
 
+
 	hid_t history = xyOpenH5(ini,"history");
 	pCreateEnergyDatasets(history,pop);
 
 	// Add more time series to history if you want
 	// xyCreateDataset(history,"/group/group/dataset");
-
-	free(denorm);
-	free(dimen);
 
 	/*
 	 * INITIAL CONDITIONS
@@ -147,18 +145,18 @@ void regular(dictionary *ini){
     oComputeCapacitanceMatrix(obj, ini, mpiInfo);
     
 	// Initalize particles
-	pPosUniform(ini, pop, mpiInfo, rngSync);
-	pVelMaxwell(ini, pop, rng);
+	// pPosUniform(ini, pop, mpiInfo, rngSync);
+	pPosLattice(ini, pop, mpiInfo);
+	pVelZero(pop);
+	// pVelMaxwell(ini, pop, rng);
 	double maxVel = iniGetDouble(ini,"population:maxVel");
-
-	// pPosLattice(ini, pop, mpiInfo);
-	// pVelZero(pop);
 
 	// Perturb particles
 	//pPosPerturb(ini, pop, mpiInfo);
 
 	// Migrate those out-of-bounds due to perturbation
 	extractEmigrants(pop, mpiInfo);
+
 	puMigrate(pop, mpiInfo, rho);
 
 	/*
@@ -177,6 +175,7 @@ void regular(dictionary *ini){
     gWriteH5(rho, mpiInfo, (double) 0);
 
 	// Get initial E-field
+
 	solve(mgAlgo, mgRho, mgPhi, mgRes, mpiInfo);
     gWriteH5(phi, mpiInfo, (double) 0);
 	gFinDiff1st(phi, E);
@@ -193,7 +192,7 @@ void regular(dictionary *ini){
 	 * TIME LOOP
 	 */
 
-	Timer *t = tAlloc(rank);
+	Timer *t = tAlloc(mpiInfo->mpiRank);
 
 	// n should start at 1 since that's the timestep we have after the first
 	// iteration (i.e. when storing H5-files).
@@ -226,15 +225,23 @@ void regular(dictionary *ini){
 		distr(pop, rho);
 		gHaloOp(addSlice, rho, mpiInfo, FROMHALO);
         // Keep writing Rho here.
-        gWriteH5(rho, mpiInfo, (double) n);
+    gWriteH5(rho, mpiInfo, (double) n);
         gWriteH5(rhoObj, mpiInfo, (double) n);
         // Add object charge to rho.
         gAddTo(rho, rhoObj);
         gHaloOp(addSlice, rho, mpiInfo, FROMHALO);
 		//gAssertNeutralGrid(rho, mpiInfo);
 
+
 		// Compute electric potential phi
-		solve(mgAlgo, mgRho, mgPhi, mgRes, mpiInfo);
+		// solve(mgAlgo, mgRho, mgPhi, mgRes, mpiInfo);
+
+		// mgSolve(solver, rho, phi, mpiInfo);
+		// sSolve(solver, rho, phi, mpiInfo);
+
+		solve(solver, rho, phi, mpiInfo);
+
+		gHaloOp(setSlice, phi, mpiInfo, TOHALO); // Needed by sSolve but not mgSolve
 
 		//gAssertNeutralGrid(phi, mpiInfo);
 
@@ -289,7 +296,7 @@ void regular(dictionary *ini){
     gCloseH5(rhoObj);
 	gCloseH5(phi);
 	gCloseH5(E);
-	oCloseH5(obj);
+	// oCloseH5(obj);
 	xyCloseH5(history);
 
 	// Free memory
@@ -300,10 +307,10 @@ void regular(dictionary *ini){
 	gFree(rho);
 	gFree(rhoObj);
 	gFree(phi);
-	gFree(res);
 	gFree(E);
 	pFree(pop);
-	oFree(obj);
+	uFree(units);
+	// oFree(obj);
 
 	gsl_rng_free(rngSync);
 	gsl_rng_free(rng);
