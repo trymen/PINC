@@ -40,7 +40,8 @@ int main(int argc, char *argv[]){
 	 */
 	iniClose(ini);
 	MPI_Barrier(MPI_COMM_WORLD);
-	msg(STATUS,"PINC completed successfully!"); // Needs MPI
+	//msg(STATUS,"PINC completed successfully!"); // Needs MPI
+    msg(STATUS,"All done, now go have a beer!");
 	MPI_Finalize();
 
 	return 0;
@@ -92,6 +93,7 @@ void regular(dictionary *ini){
 	void *solver = solverAlloc(ini, rho, phi);
 	
     Object *obj = oAlloc(ini);              // for capMatrix - objects
+//TODO: look intomultigrid E,rho,rhoObj
 
 	// Creating a neighbourhood in the rho to handle migrants
 	gCreateNeighborhood(ini, mpiInfo, rho);
@@ -137,6 +139,10 @@ void regular(dictionary *ini){
     //Compute capacitance matrix
     oComputeCapacitanceMatrix(obj, ini, mpiInfo);               // for capMatrix - objects
 
+    //Compute capacitance matrix
+    
+    oComputeCapacitanceMatrix(obj, ini, mpiInfo);
+    
 	// Initalize particles
 	// pPosUniform(ini, pop, mpiInfo, rngSync);
 	pPosLattice(ini, pop, mpiInfo);
@@ -145,7 +151,7 @@ void regular(dictionary *ini){
 	double maxVel = iniGetDouble(ini,"population:maxVel");
 
 	// Perturb particles
-	pPosPerturb(ini, pop, mpiInfo);
+	//pPosPerturb(ini, pop, mpiInfo);
 
 	// Migrate those out-of-bounds due to perturbation
 	extractEmigrants(pop, mpiInfo);
@@ -160,13 +166,17 @@ void regular(dictionary *ini){
     gZero(rhoObj);                                          // for capMatrix - objects
     oCollectObjectCharge(pop, rhoObj, obj, mpiInfo);        // for capMatrix - objects
     gZero(rhoObj);                                          // for capMatrix - objects
+
     
 	// Get initial charge density
 	distr(pop, rho);
 	gHaloOp(addSlice, rho, mpiInfo, FROMHALO);
+    gWriteH5(rho, mpiInfo, (double) 0);
 
 	// Get initial E-field
-	solve(solver, rho, phi, mpiInfo);
+
+	solve(mgAlgo, mgRho, mgPhi, mgRes, mpiInfo);
+    gWriteH5(phi, mpiInfo, (double) 0);
 	gFinDiff1st(phi, E);
 	gHaloOp(setSlice, E, mpiInfo, TOHALO);
 	gMul(E, -1.);
@@ -188,8 +198,10 @@ void regular(dictionary *ini){
 	int nTimeSteps = iniGetInt(ini,"time:nTimeSteps");
 	for(int n = 1; n <= nTimeSteps; n++){
 
+
 		msg(STATUS,"Computing time-step %i",n);
         msg(STATUS, "Nr. of particles %i: ",(pop->iStop[0]- pop->iStart[0]));
+
 		MPI_Barrier(MPI_COMM_WORLD);	// Temporary, shouldn't be necessary
 
 		// Check that no particle moves beyond a cell (mostly for debugging)
@@ -198,8 +210,8 @@ void regular(dictionary *ini){
 		tStart(t);
 
 		// Move particles
+		// oRayTrace(pop, obj, deltaRho); <- do we need this still???
 		puMove(pop);
-		// oRayTrace(pop, obj);
 
 		// Migrate particles (periodic boundaries)
 		extractEmigrants(pop, mpiInfo);
@@ -214,6 +226,13 @@ void regular(dictionary *ini){
 		// Compute charge density
 		distr(pop, rho);
 		gHaloOp(addSlice, rho, mpiInfo, FROMHALO);
+        // Keep writing Rho here.
+    gWriteH5(rho, mpiInfo, (double) n);
+        gWriteH5(rhoObj, mpiInfo, (double) n);
+        // Add object charge to rho.
+        gAddTo(rho, rhoObj);
+        gHaloOp(addSlice, rho, mpiInfo, FROMHALO);
+		//gAssertNeutralGrid(rho, mpiInfo);
 
         // Keep writing Rho here.
         //gWriteH5(rho, mpiInfo, (double) n);                 // for capMatrix - objects
@@ -239,19 +258,23 @@ void regular(dictionary *ini){
 
 		gHaloOp(setSlice, phi, mpiInfo, TOHALO); // Needed by sSolve but not mgSolve
 
-		gAssertNeutralGrid(phi, mpiInfo);
+		//gAssertNeutralGrid(phi, mpiInfo);
 
-        
-        
+		// Second run with solver to account for charges
+		oApplyCapacitanceMatrix(rho, phi, obj, mpiInfo);
+        solve(mgAlgo, mgRho, mgPhi, mgRes, mpiInfo);
+        //oApplyCapacitanceMatrix(rho, phi, obj, mpiInfo);
+        //solve(mgAlgo, mgRho, mgPhi, mgRes, mpiInfo);
         
 		// Compute E-field
 		gFinDiff1st(phi, E);
 		gHaloOp(setSlice, E, mpiInfo, TOHALO);
 		gMul(E, -1.);
 
-		gAssertNeutralGrid(E, mpiInfo);
+		//gAssertNeutralGrid(E, mpiInfo);
 		// Apply external E
 		// gAddTo(Ext);
+        // How about external B?
 
 		// Accelerate particle and compute kinetic energy for step n
 		acc(pop, E);
@@ -268,12 +291,11 @@ void regular(dictionary *ini){
 		// xyWrite(history,"/group/group/dataset",(double)n,value,MPI_SUM);
 
 		//Write h5 files
-		gWriteH5(E, mpiInfo, (double) n);
+    gWriteH5(E, mpiInfo, (double) n);
 		gWriteH5(rho, mpiInfo, (double) n);
 		gWriteH5(phi, mpiInfo, (double) n);
 		pWriteH5(pop, mpiInfo, (double) n, (double)n+0.5);
 		pWriteEnergy(history,pop,(double)n);
-
 	}
 
 	if(mpiInfo->mpiRank==0) tMsg(t->total, "Time spent: ");
@@ -286,18 +308,19 @@ void regular(dictionary *ini){
 	// Close h5 files
 	pCloseH5(pop);
 	gCloseH5(rho);
-    gCloseH5(rhoObj);       // for capMatrix - objects
+  gCloseH5(rhoObj);       // for capMatrix - objects
 	gCloseH5(phi);
 	gCloseH5(E);
-    oCloseH5(obj);          // for capMatrix - objects
+  oCloseH5(obj);          // for capMatrix - objects
 	xyCloseH5(history);
 
 	// Free memory
-	// sFree(solver);
-	// mgFreeSolver(solver);
-	solverFree(solver);
+	mgFree(mgRho);
+    mgFree(mgRhoObj);
+	mgFree(mgPhi);
+	mgFree(mgRes);
 	gFree(rho);
-    gFree(rhoObj);          // for capMatrix - objects
+  gFree(rhoObj);          // for capMatrix - objects
 	gFree(phi);
 	gFree(E);
 	pFree(pop);

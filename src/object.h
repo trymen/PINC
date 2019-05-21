@@ -15,11 +15,11 @@ typedef struct{
 	Grid *domain;					///< Represents presence of objects
 	long int *lookupInterior;		///< Indices of the interior of the objects
 	long int *lookupInteriorOffset;	///< Offset in the above per object (nObjects+1 elements)
-    long int *lookupSurface;        ///< Indices of the surface nodes of the objects
-    long int *lookupSurfaceOffset;  ///< Offset in the above per object (nObjects+1 elements)
-    double *capMatrix;              ///< Array holding the capacitance matrices for each object
-    double capMatrixInvSum;         ///< Array holding the total sum of capMatrix elements (nObjects elements)
-    double *invNeedCoffeeMatrix;    ///< Better name wanted...
+  long int *lookupSurface;        ///< Indices of the surface nodes of the objects
+  long int *lookupSurfaceOffset;  ///< Offset in the above per object (nObjects+1 elements)
+  double *capMatrix;              ///< Array holding the capacitance matrices for each object
+  double capMatrixInvSum;         ///< Array holding the total sum of capMatrix elements (nObjects elements)
+  double *invNeedCoffeeMatrix;    ///< Better name wanted...
 	int nObjects;					///< Number of objects
 } Object;
 
@@ -119,3 +119,10 @@ void oCollectObjectCharge(Population *pop, Grid *rhoObj, Object *obj,
 void oRayTrace(Population *pop, const Object *obj);
 
 #endif // OBJECT_H
+
+
+
+
+
+
+
